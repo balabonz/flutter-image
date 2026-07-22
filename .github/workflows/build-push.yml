@@ -9,6 +9,15 @@ on:
       - sdk/**
       - .github/workflows/build-push.yml
   workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: "Flutter version to build (e.g. 3.35.0). Leave empty to build stable+beta from versions.env"
+        required: false
+        type: string
+      android_sdk_version:
+        description: "Android SDK base tag (default: from versions.env)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -18,12 +27,28 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.flutter_version }}" ]; then
+            MATRIX=$(jq -nc --arg version "${{ inputs.flutter_version }}" \
+              '{include: [{mode: "manual", flutter_version: $version}]}')
+          else
+            MATRIX='{"include":[{"mode":"channel","channel":"stable"},{"mode":"channel","channel":"beta"}]}'
+          fi
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        channel: [stable, beta]
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -33,24 +58,38 @@ jobs:
         run: |
           # shellcheck disable=SC1091
           source versions.env
+
+          if [ -n "${{ inputs.android_sdk_version }}" ]; then
+            ANDROID_SDK_VERSION="${{ inputs.android_sdk_version }}"
+          fi
           echo "ANDROID_SDK_VERSION=${ANDROID_SDK_VERSION}" >> "$GITHUB_ENV"
 
-          if [ "${{ matrix.channel }}" = "stable" ]; then
+          if [ "${{ matrix.mode }}" = "manual" ]; then
+            echo "FLUTTER_VERSION=${{ matrix.flutter_version }}" >> "$GITHUB_ENV"
+            echo "BUILD_MODE=manual" >> "$GITHUB_ENV"
+          elif [ "${{ matrix.channel }}" = "stable" ]; then
             echo "FLUTTER_VERSION=${FLUTTER_STABLE}" >> "$GITHUB_ENV"
+            echo "BUILD_MODE=channel" >> "$GITHUB_ENV"
           else
             echo "FLUTTER_VERSION=${FLUTTER_BETA}" >> "$GITHUB_ENV"
+            echo "BUILD_MODE=channel" >> "$GITHUB_ENV"
           fi
 
       - name: Set image tags
         run: |
           VERSION_TAG="${FLUTTER_VERSION//+/-}"
           echo "VERSION_TAG=${VERSION_TAG}" >> "$GITHUB_ENV"
+          echo "SMOKE_TAG=${VERSION_TAG}" >> "$GITHUB_ENV"
 
           TAGS="${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${VERSION_TAG}"
-          TAGS="${TAGS},${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ matrix.channel }}"
 
-          if [ "${{ matrix.channel }}" = "stable" ]; then
-            TAGS="${TAGS},${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:latest"
+          if [ "${{ matrix.mode }}" = "channel" ]; then
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ matrix.channel }}"
+            echo "SMOKE_TAG=${{ matrix.channel }}" >> "$GITHUB_ENV"
+
+            if [ "${{ matrix.channel }}" = "stable" ]; then
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:latest"
+            fi
           fi
 
           echo "IMAGE_TAGS=${TAGS}" >> "$GITHUB_ENV"
@@ -86,7 +125,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker pull "${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ matrix.channel }}"
+          docker pull "${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ env.SMOKE_TAG }}"
           docker run --rm \
-            "${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ matrix.channel }}" \
+            "${{ env.REGISTRY }}/${{ github.repository_owner }}/flutter:${{ env.SMOKE_TAG }}" \
             flutter doctor -v
