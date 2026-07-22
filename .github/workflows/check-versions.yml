@@ -1,0 +1,37 @@
+name: Check Flutter versions
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  check_versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Check for new Flutter versions
+        run: bash scripts/update_flutter_versions.sh
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update Flutter versions"
+          title: "chore: update Flutter versions"
+          body: |
+            Automated update of Flutter stable/beta versions from
+            [releases_linux.json](https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json).
+
+            Merging this PR will trigger a new image build and push to GHCR.
+          branch: chore/update-flutter-version
+          delete-branch: true
